@@ -1,31 +1,37 @@
 """
-Product Category CLASSIFIER (tf_menu.csv edition)
+Product Category CLASSIFIER (tf_menu.csv edition) — Validator-style Gemini calling
 - Classifies 500k+ products into Level 1 / Level 2 based on strict JSON rules.
 - Input: tf_menu.csv (item_id, category_name, item_title, item_description)
 - Output: tf_menu_labeled.csv (Appends results incrementally)
 
-FEATURES:
-- Thread-local Gemini model instances (thread-safe)
-- Rate limiter
-- Resume by reading output file item_id
-- Telegram minute reports (success/unknown/error shares + cost)
-- Final report: counts per Level 1 and Level 1->Level 2
+YOU REQUESTED:
+- Switch Gemini calling/communication method to match the pasted validator script:
+  1) Do NOT use system_instruction in GenerativeModel
+  2) Do NOT use response_mime_type="application/json"
+  3) Put all instructions + taxonomy inside the prompt string
+  4) Call model.generate_content(prompt) (string prompt)
 
-CRITICAL ERROR HANDLING (force stop app + stop API calls):
-- 403 (http2 status 403)
-- GOAWAY / client_misbehavior / grpc_status:14 + http2_error:11
+ERROR HANDLING (as previously requested):
+- Critical (STOP WHOLE APP, stop API calls, force exit):
+  - 403 / permission / forbidden
+  - GOAWAY received / client_misbehavior / grpc_status:14 http2_error:11
+- Transient (retry with exponential backoff + jitter):
+  - 504 Stream cancelled / RPC CANCELLED
+  - 504 Deadline expired before operation could complete
+  - 429, 5xx, UNAVAILABLE, timeouts, network issues
 
-TRANSIENT ERROR HANDLING (keep running with exponential backoff + per-request timeout):
-- 504 Stream cancelled / RPC CANCELLED
-- 504 Deadline expired before operation could complete
-- 429 rate limit
-- Other transient network/server issues
+OPERATIONAL SETTINGS (as requested):
+1) Exponential backoff
+2) Lower MAX_WORKERS to 6
+3) Do NOT reduce batch size
+4) Add per request timeout (best-effort; depends on google-generativeai version)
+5) Telegram minute report with cost
 
-Per your request:
-1) Exponential backoff (with jitter)
-2) MAX_WORKERS lowered to 6
-3) DO NOT reduce batch size
-4) Add a per request timeout (best-effort; depends on installed google-generativeai version)
+NOTES:
+- This uses a SINGLE shared model instance like the pasted validator script.
+  To reduce thread-safety/transport weirdness, the actual generate_content call is protected by a lock
+  (still parallel preprocessing/writing/reporting; LLM calls are serialized under lock).
+  If you want FULL parallel LLM calls (higher throughput), remove the lock — but that increases chance of GOAWAY/stream issues.
 """
 
 from __future__ import annotations
@@ -52,36 +58,33 @@ import google.generativeai as genai
 # ============================ CONFIGURATION ============================
 
 INPUT_FILE = "tf_menu.csv"
-OUTPUT_FILE = "tf_menu_labeled_v4_Bakoff.csv"
-TAXONOMY_FILE = "category_definitions2.json"
+OUTPUT_FILE = "tf_menu_labeled.csv"
+TAXONOMY_FILE = "category_definitions.json"
 
 CONFIG: Dict[str, Any] = {
     # --- Gemini ---
-    "GEMINI_API_KEY": os.getenv("GENAI_API_KEY", "AIzaSyCS2tyzKaeqKmeYf7px31KMMv2LEvt85d4"),
+    "GEMINI_API_KEY": os.getenv("GENAI_API_KEY", "YOUR_API_KEY_HERE"),
     "MODEL_NAME": "gemini-3-flash-preview",
     "TEMPERATURE": 0.0,
 
     # --- Processing ---
-    # (Per request) lower max workers to 6
-    "MAX_WORKERS": 2,
-    "BATCH_SIZE": 25,  # (Per request) do not reduce
+    "MAX_WORKERS": 6,   # requested
+    "BATCH_SIZE": 25,   # do NOT reduce
     "RATE_LIMIT_PER_SEC": 10,
 
     # Retries / Backoff
-    # With 504/CANCELLED/Deadline issues, 3 retries is often not enough.
-    # Keeping this explicit and configurable.
     "MAX_RETRIES": 6,
-    "BACKOFF_BASE_SEC": 2.0,        # exponential base wait multiplier
-    "BACKOFF_MAX_SEC": 120.0,       # cap wait to avoid extremely long sleeps
-    "RETRY_JITTER_SEC": 1.0,        # random jitter to avoid thundering herd
+    "BACKOFF_BASE_SEC": 2.0,
+    "BACKOFF_MAX_SEC": 120.0,
+    "RETRY_JITTER_SEC": 1.0,
 
-    # bounded in-flight futures to avoid creating tens of thousands of futures at once
+    # bounded in-flight futures
     "MAX_IN_FLIGHT_MULTIPLIER": 3,
 
     # --- Telegram ---
     "TELEGRAM_ENABLED": True,
-    "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", "8205938582:AAG-fhOjW4tMPkNRpYU8J_Xg7vgMLisHCBU"),
-    "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", "-5091693030"),
+    "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", ""),
+    "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", ""),
     "TELEGRAM_TIMEOUT_SEC": 15,
     "TELEGRAM_MAX_MSG_CHARS": 4000,
 
@@ -89,18 +92,17 @@ CONFIG: Dict[str, Any] = {
     "REPORT_EVERY_SECONDS": 60,  # every minute
 
     # --- Per request timeout (best-effort) ---
-    # Some google-generativeai versions accept request_options={"timeout": ...}
     "REQUEST_TIMEOUT_SEC": 180,
 }
+
+# Configure Gemini (same style as pasted validator script)
+genai.configure(api_key=CONFIG["GEMINI_API_KEY"])
 
 
 # ============================ GLOBAL SHUTDOWN FLAG ============================
 
 class ShutdownFlag:
-    """
-    Global flag to signal immediate shutdown on critical errors.
-    Any worker thread can set this, and main loop will stop scheduling/cancel futures.
-    """
+    """Global flag to signal immediate shutdown on critical errors."""
     def __init__(self):
         self._should_shutdown = False
         self._reason = ""
@@ -123,43 +125,33 @@ class ShutdownFlag:
 shutdown_flag = ShutdownFlag()
 
 
-# ============================ GLOBAL GEMINI CONFIG ============================
-
-genai.configure(api_key=CONFIG["GEMINI_API_KEY"])
-
-
 # ============================ RATE LIMITER ============================
 
 class RateLimiter:
-    def __init__(self, max_per_sec: float):
-        self.interval = 1.0 / max_per_sec if max_per_sec > 0 else 0.0
+    """Thread-safe rate limiter"""
+    def __init__(self, max_calls_per_second: float):
+        self.max_calls_per_second = max_calls_per_second
+        self.min_interval = 1.0 / max_calls_per_second if max_calls_per_second > 0 else 0.0
         self.last_call = 0.0
         self.lock = threading.Lock()
 
     def wait(self):
-        if self.interval <= 0:
+        if self.min_interval <= 0:
             return
         with self.lock:
             now = time.time()
-            diff = now - self.last_call
-            if diff < self.interval:
-                time.sleep(self.interval - diff)
+            elapsed = now - self.last_call
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
             self.last_call = time.time()
 
-limiter = RateLimiter(CONFIG["RATE_LIMIT_PER_SEC"])
+rate_limiter = RateLimiter(CONFIG["RATE_LIMIT_PER_SEC"])
 
 
 # ============================ TELEGRAM REPORTER ============================
 
 class TelegramReporter:
-    def __init__(
-        self,
-        enabled: bool,
-        bot_token: str,
-        chat_id: str,
-        timeout_sec: int,
-        max_chars: int
-    ):
+    def __init__(self, enabled: bool, bot_token: str, chat_id: str, timeout_sec: int, max_chars: int):
         self.enabled = enabled and bool(bot_token) and bool(chat_id)
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -179,9 +171,9 @@ class TelegramReporter:
             nl = text.rfind("\n", start, end)
             if nl != -1 and nl > start + 200:
                 end = nl
-            chunk = text[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
+            part = text[start:end].strip()
+            if part:
+                chunks.append(part)
             start = end
         return chunks
 
@@ -189,10 +181,7 @@ class TelegramReporter:
         if not self.enabled:
             return
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload_base = {
-            "chat_id": self.chat_id,
-            "disable_web_page_preview": True,
-        }
+        payload_base = {"chat_id": self.chat_id, "disable_web_page_preview": True}
 
         for part in self._chunk_text(text):
             payload = dict(payload_base)
@@ -220,23 +209,16 @@ telegram = TelegramReporter(
 @dataclass
 class CostTracker:
     """
-    Tracks token usage and cost.
-
-    Pricing placeholders:
-      - input:  $0.50 / 1M tokens
-      - output: $3.00 / 1M tokens
-
-    Note:
-    - If response.usage_metadata exists, we use it (best).
-    - Otherwise we fallback to rough estimates.
+    Token/cost tracker.
+    - Uses response.usage_metadata when available; otherwise falls back to estimates.
+    Pricing placeholders (edit to your real price):
+      input_cost_per_1m, output_cost_per_1m
     """
     input_tokens: int = 0
     output_tokens: int = 0
     calls: int = 0
-
     input_cost_per_1m: float = 0.50
     output_cost_per_1m: float = 3.00
-
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def update(self, in_tokens: int, out_tokens: int):
@@ -267,10 +249,8 @@ class StatsTracker:
     success: int = 0
     unknown: int = 0
     error: int = 0
-
     level1_counts: Counter = field(default_factory=Counter)
     level12_counts: Counter = field(default_factory=Counter)
-
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def update_from_rows(self, rows: List[Dict[str, Any]]):
@@ -311,6 +291,11 @@ def _clean_text(x: Any) -> str:
         return ""
     return str(x).replace('"', "").replace("\n", " ").strip()
 
+def _pct(part: int, total: int) -> str:
+    if total <= 0:
+        return "0.00%"
+    return f"{(100.0 * part / total):.2f}%"
+
 def _strip_code_fences(text: str) -> str:
     t = (text or "").strip()
     if t.startswith("```"):
@@ -318,11 +303,6 @@ def _strip_code_fences(text: str) -> str:
         if t.endswith("```"):
             t = t[:-3]
     return t.strip()
-
-def _pct(part: int, total: int) -> str:
-    if total <= 0:
-        return "0.00%"
-    return f"{(100.0 * part / total):.2f}%"
 
 def get_processed_ids(filepath: str) -> set:
     if not os.path.exists(filepath):
@@ -344,32 +324,27 @@ def batch_iter_from_df(df: pd.DataFrame, batch_size: int):
         yield batch
 
 def save_final_reports(level1_counts: Counter, level12_counts: Counter):
-    df_l1 = pd.DataFrame(
-        [{"level_1": k, "count": v} for k, v in level1_counts.most_common()]
+    pd.DataFrame([{"level_1": k, "count": v} for k, v in level1_counts.most_common()]).to_csv(
+        "final_level1_counts.csv", index=False, encoding="utf-8-sig"
     )
-    df_l1.to_csv("final_level1_counts.csv", index=False, encoding="utf-8-sig")
-
-    df_l12 = pd.DataFrame(
-        [{"level_1": k[0], "level_2": k[1], "count": v} for k, v in level12_counts.most_common()]
+    pd.DataFrame([{"level_1": k[0], "level_2": k[1], "count": v} for k, v in level12_counts.most_common()]).to_csv(
+        "final_level2_counts.csv", index=False, encoding="utf-8-sig"
     )
-    df_l12.to_csv("final_level2_counts.csv", index=False, encoding="utf-8-sig")
 
 def format_progress_message(snap: Dict[str, Any]) -> str:
     processed = snap["processed"]
     success = snap["success"]
     unknown = snap["unknown"]
     error = snap["error"]
-
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = (
+    return (
         f"[tf_menu] Minute report @ {ts}\n"
         f"Processed: {processed:,}\n"
         f"✅ Success: {success:,} ({_pct(success, processed)})\n"
         f"❓ Unknown: {unknown:,} ({_pct(unknown, processed)})\n"
-        f"❌ Error:   {error:,} ({_pct(error, processed)})\n"
-        f"\n[COST]\n{cost_tracker.summary_str()}\n"
+        f"❌ Error:   {error:,} ({_pct(error, processed)})\n\n"
+        f"[COST]\n{cost_tracker.summary_str()}\n"
     )
-    return msg
 
 def format_shutdown_message(reason: str) -> str:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -417,14 +392,9 @@ def format_final_message(snap: Dict[str, Any], top_n_l1: int = 40, top_n_l12: in
     return "\n".join(lines)
 
 
-# ============================ CRITICAL + TRANSIENT ERROR DETECTION ============================
+# ============================ ERROR DETECTION + BACKOFF ============================
 
 def is_critical_gemini_error(err: str) -> bool:
-    """
-    Critical = stop whole app immediately (your request).
-    - 403 errors (permission / forbidden / http2 403)
-    - GOAWAY / client_misbehavior / grpc_status:14 + http2_error:11
-    """
     e = (err or "").lower()
 
     if "status: 403" in e or "received http2 header with status: 403" in e:
@@ -436,29 +406,13 @@ def is_critical_gemini_error(err: str) -> bool:
     if "grpc_status:14" in e and "http2_error:11" in e:
         return True
 
-    auth_phrases = [
-        "permission denied",
-        "authentication",
-        "invalid api key",
-        "unauthorized",
-        "forbidden",
-    ]
+    auth_phrases = ["permission denied", "authentication", "invalid api key", "unauthorized", "forbidden"]
     if any(p in e for p in auth_phrases):
         return True
 
     return False
 
 def is_transient_gemini_error(err: str) -> bool:
-    """
-    Transient = retry with exponential backoff (your request).
-    Specifically handle:
-    - "504 Stream cancelled; ... status = CANCELLED: Stream cancelled"
-    - "504 Deadline expired before operation could complete."
-    Also treat common transient conditions:
-    - 429
-    - 500/502/503/504
-    - UNAVAILABLE, CANCELLED, DEADLINE_EXCEEDED (grpc-ish)
-    """
     e = (err or "").lower()
 
     if "429" in e:
@@ -483,17 +437,9 @@ def is_transient_gemini_error(err: str) -> bool:
         if code in e:
             return True
 
-    # network-ish transient hints
     transient_phrases = [
-        "connection reset",
-        "connection aborted",
-        "timed out",
-        "timeout",
-        "tls",
-        "socket",
-        "temporarily unavailable",
-        "server closed",
-        "broken pipe",
+        "connection reset", "connection aborted", "timed out", "timeout", "tls",
+        "socket", "temporarily unavailable", "server closed", "broken pipe",
     ]
     if any(p in e for p in transient_phrases):
         return True
@@ -501,36 +447,88 @@ def is_transient_gemini_error(err: str) -> bool:
     return False
 
 def compute_backoff_seconds(attempt: int) -> float:
-    """
-    Exponential backoff with jitter, capped.
-    attempt is 0-based.
-    """
     base = float(CONFIG["BACKOFF_BASE_SEC"])
     cap = float(CONFIG["BACKOFF_MAX_SEC"])
     jitter = float(CONFIG["RETRY_JITTER_SEC"])
 
-    # exponential: base * 2^attempt
     wait = base * (2 ** attempt)
-
-    # add jitter in [0, jitter]
     wait += random.random() * jitter
 
-    # cap
     if wait > cap:
         wait = cap + (random.random() * jitter)
 
     return max(0.0, wait)
 
 
-# ============================ CLASSIFIER ENGINE (THREAD-LOCAL MODEL) ============================
+# ============================ JSON PARSING (validator-style robust parser) ============================
+
+def parse_json_strict(text: str) -> Any:
+    """
+    STRICT-ish parser that tries:
+    1) direct json.loads
+    2) markdown code blocks
+    3) substring between first '{' and last '}' OR first '[' and last ']'
+    Raises ValueError if cannot parse.
+    """
+    raw = (text or "").strip()
+
+    # Remove common code fences first (safe)
+    cleaned = _strip_code_fences(raw)
+
+    # 1) direct parse
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    # 2) try to extract from ```json ... ``` or ``` ... ```
+    try:
+        lower = raw.lower()
+        if "```json" in lower:
+            start = lower.find("```json") + 7
+            end = raw.find("```", start)
+            if end != -1:
+                candidate = raw[start:end].strip()
+                return json.loads(candidate)
+        if "```" in raw:
+            start = raw.find("```") + 3
+            end = raw.find("```", start)
+            if end != -1:
+                candidate = raw[start:end].strip()
+                return json.loads(candidate)
+    except Exception:
+        pass
+
+    # 3) boundary substring
+    first_brace = raw.find("{")
+    last_brace = raw.rfind("}")
+    first_bracket = raw.find("[")
+    last_bracket = raw.rfind("]")
+
+    candidates: List[str] = []
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        candidates.append(raw[first_brace:last_brace + 1])
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        candidates.append(raw[first_bracket:last_bracket + 1])
+
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except Exception:
+            continue
+
+    raise ValueError("Failed to parse JSON from model response")
+
+
+# ============================ CLASSIFIER ENGINE (validator-style Gemini usage) ============================
 
 class ClassifierEngine:
     """
-    Thread-safe approach:
-    - Do NOT share a single GenerativeModel instance across threads.
-    - Use thread-local storage so each thread has its own model instance.
-    - On critical API errors, set shutdown flag and stop the whole app.
-    - On transient errors (504 CANCELLED / deadline expired), retry with exponential backoff + timeout.
+    This matches the pasted validator script method:
+    - No system_instruction passed into GenerativeModel
+    - No response_mime_type
+    - All instructions + taxonomy are inside prompt string
+    - Call model.generate_content(prompt) with string prompt
     """
 
     def __init__(self, taxonomy_path: str):
@@ -539,48 +537,22 @@ class ClassifierEngine:
 
         self.taxonomy_str = json.dumps(taxonomy, ensure_ascii=False, separators=(",", ":"))
 
-        self.system_instruction = (
-            "You are an expert AI Food Data Classifier.\n"
-            "Assign ONE 'Level 1' and ONE 'Level 2' category from the TAXONOMY below to each product.\n\n"
-            "TAXONOMY (STRICT RULES):\n"
-            f"{self.taxonomy_str}\n\n"
-            "RULES:\n"
-            "1. Analyze 'title' and 'desc'. Use 'context_category' only as a hint for ambiguity.\n"
-            "2. Strictly check 'explanation' (INCLUDES) and 'exclusions' (MUST NOT INCLUDE).\n"
-            "3. Prioritize specificity.\n"
-            "4. If NO category fits, return 'UNKNOWN'.\n\n"
-            "OUTPUT: JSON Array of objects. Each must contain:\n"
-            "[\n"
-            '  { "id": "item_id", "level_1": "...", "level_2": "...", "reason": "short reason" }\n'
-            "]\n"
-            "Return ONLY valid JSON. No extra text.\n"
+        # Single shared model instance (validator-style)
+        self.model = genai.GenerativeModel(
+            CONFIG["MODEL_NAME"],
+            generation_config={"temperature": CONFIG["TEMPERATURE"]},
         )
 
-        self._thread_local = threading.local()
-
-    def _get_thread_model(self):
-        if getattr(self._thread_local, "model", None) is None:
-            self._thread_local.model = genai.GenerativeModel(
-                model_name=CONFIG["MODEL_NAME"],
-                system_instruction=self.system_instruction,
-                generation_config={
-                    "temperature": CONFIG["TEMPERATURE"],
-                    "response_mime_type": "application/json",
-                },
-            )
-        return self._thread_local.model
+        # Lock around model.generate_content (shared model + multithreaded calls)
+        self.model_lock = threading.Lock()
 
     def _fallback_results(self, products_for_prompt: List[Dict[str, Any]], reason: str) -> List[Dict[str, Any]]:
-        return [
-            {"id": p["id"], "level_1": "ERROR", "level_2": "ERROR", "reason": reason}
-            for p in products_for_prompt
-        ]
+        return [{"id": p["id"], "level_1": "ERROR", "level_2": "ERROR", "reason": reason} for p in products_for_prompt]
 
-    def _validate_and_normalize(
-        self, products_for_prompt: List[Dict[str, Any]], parsed: Any
-    ) -> List[Dict[str, Any]]:
+    def _validate_and_normalize(self, products_for_prompt: List[Dict[str, Any]], parsed: Any) -> List[Dict[str, Any]]:
         id_order = [str(p["id"]) for p in products_for_prompt]
 
+        # allow wrapper dict format {"results":[...]}
         if isinstance(parsed, dict) and "results" in parsed and isinstance(parsed["results"], list):
             parsed = parsed["results"]
 
@@ -606,12 +578,43 @@ class ClassifierEngine:
             })
         return out
 
+    def _build_prompt(self, products_for_prompt: List[Dict[str, Any]]) -> str:
+        """
+        Validator-style: embed all instructions + taxonomy inside prompt string.
+        DATA is provided as JSON array.
+        """
+        # keep the product JSON as data
+        data_json = json.dumps(products_for_prompt, ensure_ascii=False, separators=(",", ":"))
+
+        prompt = f"""You are an expert AI Food Data Classifier.
+Assign ONE "Level 1" and ONE "Level 2" category from the TAXONOMY below to each product.
+
+TAXONOMY (STRICT RULES):
+{self.taxonomy_str}
+
+RULES:
+1. Analyze 'title' and 'desc'. Use 'context_category' only as a hint for ambiguity.
+2. Strictly check 'explanation' (INCLUDES) and 'exclusions' (MUST NOT INCLUDE).
+3. Prioritize specificity (choose the most specific applicable category).
+4. If NO category fits, return "UNKNOWN".
+5. Return ONLY valid JSON. No extra text, no markdown.
+
+OUTPUT: JSON Array of objects matching input order:
+[
+  {{ "id": "item_id", "level_1": "...", "level_2": "...", "reason": "short reason" }}
+]
+
+DATA (JSON array):
+{data_json}
+"""
+        return prompt
+
     def classify_batch(self, batch_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         - If shutdown_flag is set, do NOT call the API.
-        - On critical Gemini errors, set shutdown_flag and raise RuntimeError to stop everything.
-        - On transient errors (504 stream cancelled / deadline expired), retry with exponential backoff.
-        - Per-request timeout applied best-effort.
+        - On critical errors, set shutdown flag and raise RuntimeError.
+        - On transient errors, retry with exponential backoff.
+        - Use per-request timeout best-effort.
         """
         if shutdown_flag.is_set():
             raise RuntimeError(f"Shutdown already triggered: {shutdown_flag.reason()}")
@@ -625,7 +628,7 @@ class ClassifierEngine:
                 "context_category": _clean_text(item.get("category_name")),
             })
 
-        user_payload = json.dumps(products_for_prompt, ensure_ascii=False, separators=(",", ":"))
+        prompt = self._build_prompt(products_for_prompt)
         last_err: Optional[str] = None
 
         for attempt in range(int(CONFIG["MAX_RETRIES"])):
@@ -633,22 +636,23 @@ class ClassifierEngine:
                 raise RuntimeError(f"Shutdown triggered: {shutdown_flag.reason()}")
 
             try:
-                limiter.wait()
-                model = self._get_thread_model()
+                # rate limiting (validator-style)
+                rate_limiter.wait()
 
-                # Per-request timeout (best-effort)
-                # If your installed google-generativeai doesn't support request_options, it will TypeError.
-                try:
-                    response = model.generate_content(
-                        [user_payload],
-                        request_options={"timeout": int(CONFIG["REQUEST_TIMEOUT_SEC"])},
-                    )
-                except TypeError:
-                    response = model.generate_content([user_payload])
+                # generate_content(prompt) with shared model (validator-style)
+                # per-request timeout best-effort (may not be supported by installed SDK)
+                with self.model_lock:
+                    try:
+                        response = self.model.generate_content(
+                            prompt,
+                            request_options={"timeout": int(CONFIG["REQUEST_TIMEOUT_SEC"])},
+                        )
+                    except TypeError:
+                        response = self.model.generate_content(prompt)
 
-                text = getattr(response, "text", "") or ""
+                txt = getattr(response, "text", "") or ""
 
-                # Token usage if available
+                # token usage best-effort
                 in_tokens = 0
                 out_tokens = 0
                 usage = getattr(response, "usage_metadata", None)
@@ -656,41 +660,36 @@ class ClassifierEngine:
                     in_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
                     out_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
                 else:
-                    # Fallback estimates
-                    in_tokens = max(1, len(user_payload) // 3)
-                    out_tokens = max(30, len(text) // 4)
+                    # fallback estimates (prompt can be large because taxonomy embedded)
+                    in_tokens = max(1, len(prompt) // 3)
+                    out_tokens = max(30, len(txt) // 4)
 
                 cost_tracker.update(in_tokens, out_tokens)
 
-                cleaned = _strip_code_fences(text)
-                parsed = json.loads(cleaned)
+                parsed = parse_json_strict(txt)
                 normalized = self._validate_and_normalize(products_for_prompt, parsed)
                 return normalized
 
             except Exception as e:
                 last_err = str(e)
 
-                # CRITICAL: stop the entire app
+                # critical stop
                 if is_critical_gemini_error(last_err):
                     shutdown_flag.set(f"Critical Gemini error: {last_err}")
                     raise RuntimeError(shutdown_flag.reason())
 
-                # TRANSIENT: exponential backoff
+                # transient retry with exponential backoff
                 if is_transient_gemini_error(last_err):
                     wait_s = compute_backoff_seconds(attempt)
-                    # Optional: print a short line so you see it's retrying
-                    # (not strictly required, but useful for operations)
                     print(f"[Retry] transient error (attempt {attempt+1}/{CONFIG['MAX_RETRIES']}), sleeping {wait_s:.1f}s: {last_err}")
                     time.sleep(wait_s)
                     continue
 
-                # NON-TRANSIENT, NON-CRITICAL:
-                # Still retry, but with exponential backoff as requested (more conservative).
+                # non-critical retry also with backoff (conservative)
                 wait_s = compute_backoff_seconds(attempt)
                 print(f"[Retry] non-critical error (attempt {attempt+1}/{CONFIG['MAX_RETRIES']}), sleeping {wait_s:.1f}s: {last_err}")
                 time.sleep(wait_s)
 
-        # If we exhausted retries, return ERROR for these items
         return self._fallback_results(products_for_prompt, f"API_FAIL: {last_err or 'unknown'}")
 
 
@@ -715,8 +714,7 @@ class MinuteReporter(threading.Thread):
                 telegram.send(format_shutdown_message(shutdown_flag.reason()))
                 break
 
-            snap = stats.snapshot()
-            telegram.send(format_progress_message(snap))
+            telegram.send(format_progress_message(stats.snapshot()))
 
 
 # ============================ MAIN ============================
@@ -763,8 +761,8 @@ def main():
     try:
         engine = ClassifierEngine(TAXONOMY_FILE)
     except Exception as e:
-        print(f"Failed to load taxonomy: {e}")
-        telegram.send(f"[tf_menu] FAILED to load taxonomy: {e}")
+        print(f"Failed to load taxonomy or init model: {e}")
+        telegram.send(f"[tf_menu] FAILED to load taxonomy or init model: {e}")
         return
 
     # Start minute reporter
@@ -778,9 +776,10 @@ def main():
         f"Remaining: {remaining:,}\n"
         f"Workers: {CONFIG['MAX_WORKERS']} | Batch: {CONFIG['BATCH_SIZE']} | RPS: {CONFIG['RATE_LIMIT_PER_SEC']}\n"
         f"Reporting: every {CONFIG['REPORT_EVERY_SECONDS']} seconds\n"
-        f"Retries: {CONFIG['MAX_RETRIES']} | Timeout: {CONFIG['REQUEST_TIMEOUT_SEC']}s\n"
-        f"\nCritical errors (403 / GOAWAY client_misbehavior) will stop the app immediately.\n"
-        f"Transient 504/Cancelled/DeadlineExpired will be retried with exponential backoff.\n"
+        f"Retries: {CONFIG['MAX_RETRIES']} | Timeout: {CONFIG['REQUEST_TIMEOUT_SEC']}s\n\n"
+        f"Gemini call style: validator-method (prompt string, no system_instruction, no response_mime_type).\n"
+        f"Critical errors (403 / GOAWAY client_misbehavior) stop the app immediately.\n"
+        f"Transient 504/Cancelled/DeadlineExpired are retried with exponential backoff.\n"
     )
 
     max_in_flight = max(1, int(CONFIG["MAX_WORKERS"]) * int(CONFIG["MAX_IN_FLIGHT_MULTIPLIER"]))
@@ -805,7 +804,6 @@ def main():
         with ThreadPoolExecutor(max_workers=int(CONFIG["MAX_WORKERS"])) as executor:
             futures_map: Dict[Any, List[Dict[str, Any]]] = {}
 
-            # Prime pipeline
             for _ in range(max_in_flight):
                 if not submit_next(executor, futures_map):
                     break
@@ -822,7 +820,7 @@ def main():
                         break
 
                     try:
-                        results = fut.result()  # may raise RuntimeError if shutdown triggered
+                        results = fut.result()
                         result_map = {str(r.get("id")): r for r in results if isinstance(r, dict)}
 
                         processed_rows: List[Dict[str, Any]] = []
@@ -841,11 +839,9 @@ def main():
                             }
                             processed_rows.append(row_out)
 
-                        # Append to output file immediately
                         pd.DataFrame(processed_rows).to_csv(
                             OUTPUT_FILE, mode="a", header=False, index=False, encoding="utf-8-sig"
                         )
-
                         stats.update_from_rows(processed_rows)
 
                     except RuntimeError as e:
@@ -860,15 +856,12 @@ def main():
                     if shutdown_flag.is_set():
                         break
 
-                    # Refill pipeline
                     while len(futures_map) < max_in_flight:
                         if not submit_next(executor, futures_map):
                             break
 
-                    # Break to refresh as_completed list
                     break
 
-            # If shutdown triggered, cancel remaining futures
             if shutdown_flag.is_set():
                 print("\n🚨 SHUTDOWN TRIGGERED. Cancelling remaining in-flight requests...")
                 telegram.send(format_shutdown_message(shutdown_flag.reason()))
@@ -879,7 +872,6 @@ def main():
         pbar.close()
         stop_event.set()
 
-    # Force stop if shutdown triggered
     if shutdown_flag.is_set():
         print("\n═══════════════════════════════════════════════════════════")
         print("🚨 APPLICATION STOPPED DUE TO CRITICAL GEMINI ERROR")
@@ -889,7 +881,6 @@ def main():
         print("═══════════════════════════════════════════════════════════")
         sys.exit(1)
 
-    # Normal finalize
     print("\nProcessing Complete.")
     snap = stats.snapshot()
     save_final_reports(snap["level1_counts"], snap["level12_counts"])
