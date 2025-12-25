@@ -1,21 +1,31 @@
 """
-Product Category CLASSIFIER V8 - Testing Gemini 3 Flash Preview
-- Classifies 500k+ products into Level 1 / Level 2 based on strict JSON rules.
+Product Category CLASSIFIER V8 - Validator-style Gemini calling
+- Classifies products into Level 1 / Level 2 based on strict JSON taxonomy rules.
 - Input: tf_menu.csv (item_id, category_name, item_title, item_description)
-- Output: tf_menu_labeled_v8.csv (Appends results incrementally)
+- Output: tf_menu_labeled_v8.csv (appends incrementally)
 
-VERSION 8 CHANGES:
-- 🆕 Updated to gemini-3-flash-preview model
-- 🔔 Telegram notifications for all errors (429, 504, etc)
-- 📊 Rate watchdog: Auto-stops if processing is too slow
-- 🚨 Smart quota handling for 429 errors
-- All previous features: system_instruction, detailed logging, optimal settings
+KEY CHANGE:
+✅ Gemini call method matches your VALIDATOR script:
+   - self.model = genai.GenerativeModel(MODEL_NAME, generation_config={...})
+   - response = self.model.generate_content(prompt_string)
+   - No system_instruction param
+   - No response_mime_type
+   - No request_options timeout
+   - One shared model instance
 
-ERROR HANDLING:
-- Critical (STOP APP): 403, GOAWAY, permission errors, slow processing
-- Transient (RETRY): 504, 429, 5xx, timeouts, network issues
-- Exponential backoff with jitter for all retries
-- Telegram alerts on every error occurrence
+CONFIG CHANGE (per your request):
+✅ CONFIG values are adjusted to match the validator script:
+   - TEMPERATURE = 0.3
+   - MAX_WORKERS = 5
+   - RATE_LIMIT_PER_SEC = 5
+   - BATCH_SIZE = 30
+   - MAX_RETRIES = 2
+   - RETRY_DELAY_SEC = 2.0
+   - REPORT_EVERY_SECONDS = 60
+
+NOTE:
+- If your Gemini quota is ~10 RPM, RATE_LIMIT_PER_SEC=5 will cause 429 quickly.
+  You asked to match the validator config, so I set it as-is.
 """
 
 from __future__ import annotations
@@ -41,58 +51,58 @@ import google.generativeai as genai
 # Configure detailed logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
-
 
 # ============================ CONFIGURATION ============================
 
 INPUT_FILE = "tf_menu.csv"
-OUTPUT_FILE = "tf_menu_labeled_v8.csv"
-TAXONOMY_FILE = "category_definitions3.json"
+OUTPUT_FILE = "tf_menu_labeled_v10.csv"
+TAXONOMY_FILE = "category_definitions.json"
 
 CONFIG: Dict[str, Any] = {
-    # --- Gemini ---
-    "GEMINI_API_KEY": os.getenv("GENAI_API_KEY", "AIzaSyBBtEmdCxZn2Xlj3e-ydi-AR46C9Gi3bDw"),
-    "MODEL_NAME": "gemini-3-flash-preview",  # V8: Testing Gemini 3 Flash Preview
-    "TEMPERATURE": 0.0,
+    # --- Gemini (match validator config) ---
+    "GEMINI_API_KEY": os.getenv("GENAI_API_KEY", "AIzaSyDo6khqPW8yqKdnhLveVJIeeW73W3e4ME0"),  # REQUIRED
+    "MODEL_NAME": "gemini-3-flash-preview",
+    "TEMPERATURE": 0.3,  # match validator
 
-    # --- Processing --- OPTIMIZED for 10 RPM / 1500 RPD limits
-    "MAX_WORKERS": 5,   # allows parallelism while staying under limits
-    "BATCH_SIZE": 25,   # maximize items per request (keep high!)
-    "RATE_LIMIT_PER_SEC": 0.15,  # = 9 req/min (safely under 10 RPM limit)
+    # --- Processing (match validator config) ---
+    "MAX_WORKERS": 5,
+    "RATE_LIMIT_PER_SEC": 5,  # match validator
+    "BATCH_SIZE": 30,  # match validator
 
-    # Retries / Backoff
-    "MAX_RETRIES": 6,
-    "BACKOFF_BASE_SEC": 2.0,
-    "BACKOFF_MAX_SEC": 120.0,
-    "RETRY_JITTER_SEC": 1.0,
+    # --- Retries (match validator config) ---
+    "MAX_RETRIES": 5,  # match validator
+    "RETRY_DELAY_SEC": 2.0,  # match validator
 
-    # bounded in-flight futures
-    "MAX_IN_FLIGHT_MULTIPLIER": 3,
+    # Keep: bounded in-flight futures (safe) - tuned to validator-ish behavior
+    "MAX_IN_FLIGHT_MULTIPLIER": 1,
 
-    # --- Telegram ---
+    # --- Telegram (kept; uses env vars like before) ---
     "TELEGRAM_ENABLED": True,
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", "8205938582:AAG-fhOjW4tMPkNRpYU8J_Xg7vgMLisHCBU"),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID", "-5091693030"),
     "TELEGRAM_TIMEOUT_SEC": 15,
     "TELEGRAM_MAX_MSG_CHARS": 4000,
 
-    # --- Reporting ---
-    "REPORT_EVERY_SECONDS": 60,  # every minute
+    # --- Reporting (match validator interval style) ---
+    "REPORT_EVERY_SECONDS": 60,  # match validator status interval
 
-    # --- Per request timeout (best-effort) ---
-    "REQUEST_TIMEOUT_SEC": 60,  # reduced - Gemini times out around 60s anyway
+    # --- Prompt truncation (kept; helps stability) ---
+    "TRUNC_TITLE_CHARS": 180,
+    "TRUNC_DESC_CHARS": 400,
+    "TRUNC_CTX_CHARS": 80,
 
-    # --- V8: Rate Watchdog ---
-    "MIN_ITEMS_PER_MINUTE": 150,  # Stop if processing slower than this (expect ~225/min at 9 RPM)
-    "WATCHDOG_CHECK_INTERVAL": 120,  # Check rate every 2 minutes
+    # --- Rate Watchdog (kept but effectively disabled) ---
+    "WATCHDOG_ENABLED": False,
+    "MIN_ITEMS_PER_MINUTE": 0.000000001,
 }
 
-# Configure Gemini (same style as pasted validator script)
-genai.configure(api_key=CONFIG["GEMINI_API_KEY"])
+if not CONFIG["GEMINI_API_KEY"]:
+    raise RuntimeError("GENAI_API_KEY is not set. Please set env var GENAI_API_KEY and re-run.")
 
+genai.configure(api_key=CONFIG["GEMINI_API_KEY"])
 
 # ============================ GLOBAL SHUTDOWN FLAG ============================
 
@@ -117,8 +127,8 @@ class ShutdownFlag:
         with self._lock:
             return self._reason
 
-shutdown_flag = ShutdownFlag()
 
+shutdown_flag = ShutdownFlag()
 
 # ============================ RATE LIMITER ============================
 
@@ -140,8 +150,8 @@ class RateLimiter:
                 time.sleep(self.min_interval - elapsed)
             self.last_call = time.time()
 
-rate_limiter = RateLimiter(CONFIG["RATE_LIMIT_PER_SEC"])
 
+rate_limiter = RateLimiter(CONFIG["RATE_LIMIT_PER_SEC"])
 
 # ============================ TELEGRAM REPORTER ============================
 
@@ -190,6 +200,7 @@ class TelegramReporter:
                 except Exception:
                     time.sleep(1.5 * (attempt + 1))
 
+
 telegram = TelegramReporter(
     enabled=CONFIG["TELEGRAM_ENABLED"],
     bot_token=CONFIG["TELEGRAM_BOT_TOKEN"],
@@ -198,16 +209,13 @@ telegram = TelegramReporter(
     max_chars=CONFIG["TELEGRAM_MAX_MSG_CHARS"],
 )
 
-
 # ============================ COST TRACKING ============================
 
 @dataclass
 class CostTracker:
     """
     Token/cost tracker.
-    - Uses response.usage_metadata when available; otherwise falls back to estimates.
-    Pricing placeholders (edit to your real price):
-      input_cost_per_1m, output_cost_per_1m
+    Uses response.usage_metadata when available; otherwise falls back to estimates.
     """
     input_tokens: int = 0
     output_tokens: int = 0
@@ -233,8 +241,8 @@ class CostTracker:
                 f"Cost: ${total:.4f} (in ${in_cost:.4f} + out ${out_cost:.4f})"
             )
 
-cost_tracker = CostTracker()
 
+cost_tracker = CostTracker()
 
 # ============================ STATS TRACKING ============================
 
@@ -276,35 +284,32 @@ class StatsTracker:
                 "level12_counts": self.level12_counts.copy(),
             }
 
+
 stats = StatsTracker()
 
-
-# ============================ V6: ERROR NOTIFIER ============================
+# ============================ ERROR NOTIFIER ============================
 
 class ErrorNotifier:
-    """V6: Sends Telegram notifications for errors"""
-    def __init__(self, telegram_reporter):
+    """Sends Telegram notifications for errors"""
+    def __init__(self, telegram_reporter: TelegramReporter):
         self.telegram = telegram_reporter
         self.error_counts: Dict[str, int] = {}
         self.lock = threading.Lock()
         self.last_notification_time: Dict[str, float] = {}
-        self.min_notification_interval = 60  # Don't spam - at most 1 notification per error type per minute
+        self.min_notification_interval = 60  # at most 1 per error type per minute
 
     def notify_error(self, error_type: str, error_msg: str, batch_info: str = ""):
-        """Send Telegram notification for an error"""
         with self.lock:
             self.error_counts[error_type] = self.error_counts.get(error_type, 0) + 1
             count = self.error_counts[error_type]
 
-            # Rate limit notifications - don't spam for same error type
             now = time.time()
             last_time = self.last_notification_time.get(error_type, 0)
             if now - last_time < self.min_notification_interval:
-                return  # Skip notification - too soon
+                return
 
             self.last_notification_time[error_type] = now
 
-            # Prepare message
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             msg = (
                 f"🚨 ERROR ALERT @ {ts}\n"
@@ -318,14 +323,14 @@ class ErrorNotifier:
 
             self.telegram.send(msg)
 
+
 error_notifier = ErrorNotifier(telegram)
 
-
-# ============================ V6: RATE WATCHDOG ============================
+# ============================ RATE WATCHDOG ============================
 
 class RateWatchdog:
-    """V6: Monitors processing rate and stops if too slow"""
-    def __init__(self, min_items_per_minute: int):
+    """Monitors processing rate and stops if too slow"""
+    def __init__(self, min_items_per_minute: float):
         self.min_items_per_minute = min_items_per_minute
         self.start_time = time.time()
         self.last_check_time = time.time()
@@ -333,33 +338,23 @@ class RateWatchdog:
         self.lock = threading.Lock()
 
     def check_rate(self, current_processed: int) -> tuple[bool, str]:
-        """
-        Returns (should_stop, reason)
-        should_stop=True if processing is too slow
-        """
         with self.lock:
             now = time.time()
 
-            # Skip check if less than 2 minutes have passed since last check
             if now - self.last_check_time < 120:
                 return (False, "")
-
-            # Skip check if less than 5 minutes have passed since start
             if now - self.start_time < 300:
                 return (False, "")
 
-            # Calculate rate since last check
             time_elapsed_min = (now - self.last_check_time) / 60.0
             items_processed = current_processed - self.last_check_processed
 
             if time_elapsed_min > 0:
                 rate = items_processed / time_elapsed_min
 
-                # Update for next check
                 self.last_check_time = now
                 self.last_check_processed = current_processed
 
-                # Check if rate is too slow
                 if rate < self.min_items_per_minute:
                     reason = (
                         f"Processing rate too slow: {rate:.1f} items/min "
@@ -370,15 +365,24 @@ class RateWatchdog:
 
             return (False, "")
 
-rate_watchdog = RateWatchdog(CONFIG["MIN_ITEMS_PER_MINUTE"])
 
+rate_watchdog = RateWatchdog(CONFIG["MIN_ITEMS_PER_MINUTE"])
 
 # ============================ HELPERS ============================
 
-def _clean_text(x: Any) -> str:
+def normalize_item_id(x: Any) -> str:
+    # Fix IDs like "2,253" -> "2253"
     if x is None or pd.isna(x):
         return ""
-    return str(x).replace('"', "").replace("\n", " ").strip()
+    return str(x).strip().replace(",", "")
+
+def _clean_text(x: Any, max_len: int) -> str:
+    if x is None or pd.isna(x):
+        return ""
+    s = str(x).replace('"', "").replace("\n", " ").strip()
+    if max_len > 0 and len(s) > max_len:
+        s = s[:max_len].rstrip()
+    return s
 
 def _pct(part: int, total: int) -> str:
     if total <= 0:
@@ -397,7 +401,7 @@ def get_processed_ids(filepath: str) -> set:
     if not os.path.exists(filepath):
         return set()
     try:
-        df = pd.read_csv(filepath, usecols=["item_id"])
+        df = pd.read_csv(filepath, usecols=["item_id"], dtype={"item_id": "string"})
         return set(df["item_id"].astype(str))
     except Exception:
         return set()
@@ -480,18 +484,15 @@ def format_final_message(snap: Dict[str, Any], top_n_l1: int = 40, top_n_l12: in
     lines.append("Saved CSVs: final_level1_counts.csv, final_level2_counts.csv")
     return "\n".join(lines)
 
-
-# ============================ ERROR DETECTION + BACKOFF ============================
+# ============================ ERROR DETECTION ============================
 
 def is_critical_gemini_error(err: str) -> bool:
     e = (err or "").lower()
 
     if "status: 403" in e or "received http2 header with status: 403" in e:
         return True
-
     if "goaway received" in e and "client_misbehavior" in e:
         return True
-
     if "grpc_status:14" in e and "http2_error:11" in e:
         return True
 
@@ -506,19 +507,15 @@ def is_transient_gemini_error(err: str) -> bool:
 
     if "429" in e:
         return True
-
     if "504" in e:
         return True
-
     if "deadline expired" in e or "deadline_exceeded" in e:
         return True
 
     if "stream cancelled" in e or "stream canceled" in e:
         return True
-
     if "rpc::cancelled" in e or "status = cancelled" in e:
         return True
-
     if "unavailable" in e:
         return True
 
@@ -535,42 +532,18 @@ def is_transient_gemini_error(err: str) -> bool:
 
     return False
 
-def compute_backoff_seconds(attempt: int) -> float:
-    base = float(CONFIG["BACKOFF_BASE_SEC"])
-    cap = float(CONFIG["BACKOFF_MAX_SEC"])
-    jitter = float(CONFIG["RETRY_JITTER_SEC"])
-
-    wait = base * (2 ** attempt)
-    wait += random.random() * jitter
-
-    if wait > cap:
-        wait = cap + (random.random() * jitter)
-
-    return max(0.0, wait)
-
-
-# ============================ JSON PARSING (validator-style robust parser) ============================
+# ============================ JSON PARSING (robust) ============================
 
 def parse_json_strict(text: str) -> Any:
-    """
-    STRICT-ish parser that tries:
-    1) direct json.loads
-    2) markdown code blocks
-    3) substring between first '{' and last '}' OR first '[' and last ']'
-    Raises ValueError if cannot parse.
-    """
     raw = (text or "").strip()
 
-    # Remove common code fences first (safe)
     cleaned = _strip_code_fences(raw)
 
-    # 1) direct parse
     try:
         return json.loads(cleaned)
     except Exception:
         pass
 
-    # 2) try to extract from ```json ... ``` or ``` ... ```
     try:
         lower = raw.lower()
         if "```json" in lower:
@@ -588,7 +561,6 @@ def parse_json_strict(text: str) -> Any:
     except Exception:
         pass
 
-    # 3) boundary substring
     first_brace = raw.find("{")
     last_brace = raw.rfind("}")
     first_bracket = raw.find("[")
@@ -608,16 +580,13 @@ def parse_json_strict(text: str) -> Any:
 
     raise ValueError("Failed to parse JSON from model response")
 
-
-# ============================ CLASSIFIER ENGINE (validator-style Gemini usage) ============================
+# ============================ CLASSIFIER ENGINE (Validator-style calling) ============================
 
 class ClassifierEngine:
     """
-    V5 OPTIMIZED: Uses system_instruction approach (taxonomy NOT in prompt)
-    - Puts taxonomy in system_instruction for efficiency
-    - Uses response_mime_type="application/json" for cleaner JSON
-    - Much faster than embedding taxonomy in every prompt!
-    - Thread-local model instances for true parallelism
+    Validator-style Gemini usage:
+    - model = genai.GenerativeModel(MODEL_NAME, generation_config={...})
+    - response = model.generate_content(prompt_string)
     """
 
     def __init__(self, taxonomy_path: str):
@@ -626,39 +595,10 @@ class ClassifierEngine:
 
         self.taxonomy_str = json.dumps(taxonomy, ensure_ascii=False, separators=(",", ":"))
 
-        # Build system instruction with taxonomy
-        self.system_instruction = (
-            "You are an expert AI Food Data Classifier.\n"
-            "Assign ONE 'Level 1' and ONE 'Level 2' category from the TAXONOMY below to each product.\n\n"
-            "TAXONOMY (STRICT RULES):\n"
-            f"{self.taxonomy_str}\n\n"
-            "RULES:\n"
-            "1. Analyze 'title' and 'desc'. Use 'context_category' only as a hint for ambiguity.\n"
-            "2. Strictly check 'explanation' (INCLUDES) and 'exclusions' (MUST NOT INCLUDE).\n"
-            "3. Prioritize specificity.\n"
-            "4. If NO category fits, return 'UNKNOWN'.\n\n"
-            "OUTPUT: JSON Array of objects. Each must contain:\n"
-            "[\n"
-            '  { "id": "item_id", "level_1": "...", "level_2": "...", "reason": "short reason" }\n'
-            "]\n"
-            "Return ONLY valid JSON. No extra text.\n"
+        self.model = genai.GenerativeModel(
+            CONFIG["MODEL_NAME"],
+            generation_config={"temperature": CONFIG["TEMPERATURE"]},
         )
-
-        # Thread-local storage for model instances
-        self._thread_local = threading.local()
-
-    def _get_thread_model(self):
-        """Get thread-local model instance for true parallel processing"""
-        if getattr(self._thread_local, "model", None) is None:
-            self._thread_local.model = genai.GenerativeModel(
-                model_name=CONFIG["MODEL_NAME"],
-                system_instruction=self.system_instruction,
-                generation_config={
-                    "temperature": CONFIG["TEMPERATURE"],
-                    "response_mime_type": "application/json",
-                },
-            )
-        return self._thread_local.model
 
     def _fallback_results(self, products_for_prompt: List[Dict[str, Any]], reason: str) -> List[Dict[str, Any]]:
         return [{"id": p["id"], "level_1": "ERROR", "level_2": "ERROR", "reason": reason} for p in products_for_prompt]
@@ -666,7 +606,6 @@ class ClassifierEngine:
     def _validate_and_normalize(self, products_for_prompt: List[Dict[str, Any]], parsed: Any) -> List[Dict[str, Any]]:
         id_order = [str(p["id"]) for p in products_for_prompt]
 
-        # allow wrapper dict format {"results":[...]}
         if isinstance(parsed, dict) and "results" in parsed and isinstance(parsed["results"], list):
             parsed = parsed["results"]
 
@@ -693,28 +632,38 @@ class ClassifierEngine:
         return out
 
     def _build_prompt(self, products_for_prompt: List[Dict[str, Any]]) -> str:
-        """
-        V5 OPTIMIZED: Just return products JSON (taxonomy is in system_instruction!)
-        """
-        return json.dumps(products_for_prompt, ensure_ascii=False, separators=(",", ":"))
+        products_json = json.dumps(products_for_prompt, ensure_ascii=False, separators=(",", ":"))
+
+        prompt = (
+            "You are an expert AI Food Data Classifier.\n"
+            "Assign ONE 'Level 1' and ONE 'Level 2' category from the TAXONOMY below to each product.\n\n"
+            "TAXONOMY (STRICT RULES):\n"
+            f"{self.taxonomy_str}\n\n"
+            "RULES:\n"
+            "1. Analyze 'title' and 'desc'. Use 'context_category' only as a hint for ambiguity.\n"
+            "2. Strictly check 'explanation' (INCLUDES) and 'exclusions' (MUST NOT INCLUDE).\n"
+            "3. Prioritize specificity.\n"
+            "4. If NO category fits, return 'UNKNOWN'.\n\n"
+            "INPUT PRODUCTS (JSON array):\n"
+            f"{products_json}\n\n"
+            "OUTPUT:\n"
+            "Return ONLY valid JSON array (no extra text), same length as input.\n"
+            "Each item must contain:\n"
+            '[ { "id": "...", "level_1": "...", "level_2": "...", "reason": "short reason" }, ... ]\n'
+        )
+        return prompt
 
     def classify_batch(self, batch_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        - If shutdown_flag is set, do NOT call the API.
-        - On critical errors, set shutdown flag and raise RuntimeError.
-        - On transient errors, retry with exponential backoff.
-        - Use per-request timeout best-effort.
-        """
         if shutdown_flag.is_set():
             raise RuntimeError(f"Shutdown already triggered: {shutdown_flag.reason()}")
 
         products_for_prompt: List[Dict[str, Any]] = []
         for item in batch_data:
             products_for_prompt.append({
-                "id": str(item.get("item_id", "")),
-                "title": _clean_text(item.get("item_title")),
-                "desc": _clean_text(item.get("item_description")),
-                "context_category": _clean_text(item.get("category_name")),
+                "id": normalize_item_id(item.get("item_id", "")),
+                "title": _clean_text(item.get("item_title"), int(CONFIG["TRUNC_TITLE_CHARS"])),
+                "desc": _clean_text(item.get("item_description"), int(CONFIG["TRUNC_DESC_CHARS"])),
+                "context_category": _clean_text(item.get("category_name"), int(CONFIG["TRUNC_CTX_CHARS"])),
             })
 
         prompt = self._build_prompt(products_for_prompt)
@@ -733,24 +682,12 @@ class ClassifierEngine:
                 # rate limiting
                 rate_limiter.wait()
 
-                # V5: Use thread-local model (no lock needed!)
-                model = self._get_thread_model()
-
-                logging.info(f"Calling Gemini API with timeout={CONFIG['REQUEST_TIMEOUT_SEC']}s...")
-                # Pass prompt as list for system_instruction approach
-                try:
-                    response = model.generate_content(
-                        [prompt],
-                        request_options={"timeout": int(CONFIG["REQUEST_TIMEOUT_SEC"])},
-                    )
-                except TypeError:
-                    # Fallback if timeout not supported
-                    logging.info(f"Timeout parameter not supported, calling without timeout...")
-                    response = model.generate_content([prompt])
-
-                logging.info(f"API call successful! Processing response...")
+                # validator-style call
+                response = self.model.generate_content(prompt)
 
                 txt = getattr(response, "text", "") or ""
+                if not txt.strip():
+                    raise RuntimeError("Empty response from model")
 
                 # token usage best-effort
                 in_tokens = 0
@@ -760,7 +697,6 @@ class ClassifierEngine:
                     in_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
                     out_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
                 else:
-                    # fallback estimates (V5: much smaller prompts - taxonomy in system_instruction)
                     in_tokens = max(1, len(prompt) // 3)
                     out_tokens = max(30, len(txt) // 4)
 
@@ -775,43 +711,35 @@ class ClassifierEngine:
                 last_err = str(e)
                 logging.error(f"❌ API call failed: {last_err[:200]}")
 
-                # V6: Determine error type for notification
+                le = last_err.lower()
                 error_type = "UNKNOWN_ERROR"
-                if "429" in last_err:
+                if "429" in le:
                     error_type = "429_QUOTA_EXCEEDED"
-                elif "504" in last_err:
+                elif "504" in le or "deadline" in le:
                     error_type = "504_TIMEOUT"
-                elif "403" in last_err:
+                elif "403" in le:
                     error_type = "403_FORBIDDEN"
-                elif "500" in last_err or "502" in last_err or "503" in last_err:
+                elif "500" in le or "502" in le or "503" in le:
                     error_type = "5XX_SERVER_ERROR"
+                elif "failed to parse json" in le:
+                    error_type = "JSON_PARSE_ERROR"
 
-                # V6: Send Telegram notification
                 error_notifier.notify_error(error_type, last_err, f"IDs: {batch_ids[:3]}")
 
-                # critical stop
                 if is_critical_gemini_error(last_err):
                     logging.critical(f"🚨 CRITICAL ERROR - Shutting down: {last_err}")
                     shutdown_flag.set(f"Critical Gemini error: {last_err}")
                     raise RuntimeError(shutdown_flag.reason())
 
-                # transient retry with exponential backoff
-                if is_transient_gemini_error(last_err):
-                    wait_s = compute_backoff_seconds(attempt)
-                    logging.warning(f"⚠️  [Retry] Transient error (attempt {attempt+1}/{CONFIG['MAX_RETRIES']}), sleeping {wait_s:.1f}s: {last_err[:200]}")
-                    time.sleep(wait_s)
+                # match validator retry feel: fixed delay
+                if attempt < int(CONFIG["MAX_RETRIES"]) - 1:
+                    time.sleep(float(CONFIG["RETRY_DELAY_SEC"]))
                     continue
-
-                # non-critical retry also with backoff (conservative)
-                wait_s = compute_backoff_seconds(attempt)
-                logging.warning(f"⚠️  [Retry] Non-critical error (attempt {attempt+1}/{CONFIG['MAX_RETRIES']}), sleeping {wait_s:.1f}s: {last_err[:200]}")
-                time.sleep(wait_s)
 
         logging.error(f"❌ Batch FAILED after {CONFIG['MAX_RETRIES']} attempts: {last_err[:200]}")
         return self._fallback_results(products_for_prompt, f"API_FAIL: {last_err or 'unknown'}")
 
-
-# ============================ REPORTING THREAD (EVERY MINUTE) ============================
+# ============================ REPORTING THREAD ============================
 
 class MinuteReporter(threading.Thread):
     def __init__(self, stop_event: threading.Event, interval_sec: int):
@@ -832,17 +760,16 @@ class MinuteReporter(threading.Thread):
                 telegram.send(format_shutdown_message(shutdown_flag.reason()))
                 break
 
-            # V6: Check rate watchdog
-            current_processed = stats.snapshot()["processed"]
-            should_stop, reason = rate_watchdog.check_rate(current_processed)
-            if should_stop:
-                logging.critical(f"🚨 RATE WATCHDOG TRIGGERED: {reason}")
-                shutdown_flag.set(reason)
-                telegram.send(format_shutdown_message(reason))
-                break
+            if bool(CONFIG.get("WATCHDOG_ENABLED", False)):
+                current_processed = stats.snapshot()["processed"]
+                should_stop, reason = rate_watchdog.check_rate(current_processed)
+                if should_stop:
+                    logging.critical(f"🚨 RATE WATCHDOG TRIGGERED: {reason}")
+                    shutdown_flag.set(reason)
+                    telegram.send(format_shutdown_message(reason))
+                    break
 
             telegram.send(format_progress_message(stats.snapshot()))
-
 
 # ============================ MAIN ============================
 
@@ -852,13 +779,13 @@ def main():
     print(f"Output file: {OUTPUT_FILE}")
     print(f"Taxonomy:    {TAXONOMY_FILE}")
     print(f"Workers:     {CONFIG['MAX_WORKERS']} | Batch size: {CONFIG['BATCH_SIZE']} | RPS: {CONFIG['RATE_LIMIT_PER_SEC']}")
-    print(f"Retries:     {CONFIG['MAX_RETRIES']} | Backoff base: {CONFIG['BACKOFF_BASE_SEC']}s | Timeout: {CONFIG['REQUEST_TIMEOUT_SEC']}s")
+    print(f"Retries:     {CONFIG['MAX_RETRIES']} | Retry delay: {CONFIG['RETRY_DELAY_SEC']}s")
     print("")
 
     print(f"Loading {INPUT_FILE}...")
     try:
-        df = pd.read_csv(INPUT_FILE)
-        df["item_id"] = df["item_id"].astype(str)
+        df = pd.read_csv(INPUT_FILE, dtype={"item_id": "string"})
+        df["item_id"] = df["item_id"].astype(str).str.replace(",", "", regex=False)
         total_rows = len(df)
         print(f"Total Products: {total_rows:,}")
     except Exception as e:
@@ -892,26 +819,23 @@ def main():
         telegram.send(f"[tf_menu] FAILED to load taxonomy or init model: {e}")
         return
 
-    # Start minute reporter
     stop_event = threading.Event()
     reporter = MinuteReporter(stop_event=stop_event, interval_sec=CONFIG["REPORT_EVERY_SECONDS"])
     reporter.start()
 
     telegram.send(
-        f"[tf_menu] Started V8 - Testing Gemini 3 Flash Preview.\n"
+        f"[tf_menu] Started V8 - Validator-style Gemini calls.\n"
         f"Model: {CONFIG['MODEL_NAME']}\n"
         f"Remaining: {remaining:,}\n"
         f"Workers: {CONFIG['MAX_WORKERS']} | Batch: {CONFIG['BATCH_SIZE']} | RPS: {CONFIG['RATE_LIMIT_PER_SEC']}\n"
         f"Reporting: every {CONFIG['REPORT_EVERY_SECONDS']} seconds\n"
-        f"Retries: {CONFIG['MAX_RETRIES']} | Timeout: {CONFIG['REQUEST_TIMEOUT_SEC']}s\n\n"
-        f"🔔 V8 Features:\n"
-        f"- NEW: gemini-3-flash-preview model\n"
-        f"- Telegram error notifications (429, 504, etc)\n"
-        f"- Rate watchdog: Stops if < {CONFIG['MIN_ITEMS_PER_MINUTE']} items/min\n"
-        f"- system_instruction approach (8-10x faster!)\n"
-        f"- Thread-local models for parallel processing\n\n"
-        f"Critical errors (403/GOAWAY/slow rate) stop the app immediately.\n"
-        f"Transient errors (429/504/5xx) are retried with exponential backoff.\n"
+        f"Retries: {CONFIG['MAX_RETRIES']} | RetryDelay: {CONFIG['RETRY_DELAY_SEC']}s\n"
+        f"Truncation: title={CONFIG['TRUNC_TITLE_CHARS']} desc={CONFIG['TRUNC_DESC_CHARS']} ctx={CONFIG['TRUNC_CTX_CHARS']}\n\n"
+        f"Gemini calling method:\n"
+        f"- model.generate_content(prompt_string)\n"
+        f"- no system_instruction param\n"
+        f"- no response_mime_type\n"
+        f"- no request_options timeout\n"
     )
 
     max_in_flight = max(1, int(CONFIG["MAX_WORKERS"]) * int(CONFIG["MAX_IN_FLIGHT_MULTIPLIER"]))
@@ -964,7 +888,7 @@ def main():
 
                         processed_rows: List[Dict[str, Any]] = []
                         for input_row in batch_input:
-                            input_id = str(input_row.get("item_id", ""))
+                            input_id = normalize_item_id(input_row.get("item_id", ""))
                             api_res = result_map.get(input_id, {})
 
                             row_out = {

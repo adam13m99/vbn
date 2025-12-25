@@ -1,0 +1,81 @@
+/home/tapsifoodseo/product_category/category_classifier_llm8.py:39: FutureWarning: 
+
+All support for the `google.generativeai` package has ended. It will no longer be receiving 
+updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+See README for more details:
+
+https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+
+  import google.generativeai as genai
+2025-12-24 14:28:35 [INFO] 
+============================================================
+2025-12-24 14:28:35 [INFO] Starting processing: 373,629 items in 14,946 batches
+2025-12-24 14:28:35 [INFO] Workers: 3 | Batch size: 25
+2025-12-24 14:28:35 [INFO] ============================================================
+
+2025-12-24 14:28:35 [INFO] Processing batch: 25 items, IDs: ['1,248', '1,249', '1,250']...
+2025-12-24 14:28:35 [INFO] API call attempt 1/6 for batch ['1,248', '1,249', '1,250']...
+2025-12-24 14:28:35 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:28:35 [INFO] Processing batch: 25 items, IDs: ['5,053', '5,054', '5,055']...
+2025-12-24 14:28:35 [INFO] API call attempt 1/6 for batch ['5,053', '5,054', '5,055']...
+2025-12-24 14:28:35 [INFO] Processing batch: 25 items, IDs: ['5,257', '5,258', '5,259']...
+2025-12-24 14:28:35 [INFO] API call attempt 1/6 for batch ['5,257', '5,258', '5,259']...
+2025-12-24 14:28:43 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:28:51 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:29:33 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:29:34 [WARNING] ⚠️  [Retry] Transient error (attempt 1/6), sleeping 2.1s: 504 Deadline expired before operation could complete.
+2025-12-24 14:29:36 [INFO] API call attempt 2/6 for batch ['1,248', '1,249', '1,250']...
+2025-12-24 14:29:36 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:29:42 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:29:42 [WARNING] ⚠️  [Retry] Transient error (attempt 1/6), sleeping 2.6s: 504 Deadline expired before operation could complete.
+2025-12-24 14:29:45 [INFO] API call attempt 2/6 for batch ['5,053', '5,054', '5,055']...
+2025-12-24 14:29:45 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:29:50 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:29:50 [WARNING] ⚠️  [Retry] Transient error (attempt 1/6), sleeping 2.1s: 504 Deadline expired before operation could complete.
+2025-12-24 14:29:52 [INFO] API call attempt 2/6 for batch ['5,257', '5,258', '5,259']...
+2025-12-24 14:29:53 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:30:35 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:30:35 [WARNING] ⚠️  [Retry] Transient error (attempt 2/6), sleeping 4.2s: 504 Deadline expired before operation could complete.
+2025-12-24 14:30:40 [INFO] API call attempt 3/6 for batch ['1,248', '1,249', '1,250']...
+2025-12-24 14:30:40 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:30:44 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:30:44 [WARNING] ⚠️  [Retry] Transient error (attempt 2/6), sleeping 4.3s: 504 Deadline expired before operation could complete.
+2025-12-24 14:30:48 [INFO] API call attempt 3/6 for batch ['5,053', '5,054', '5,055']...
+2025-12-24 14:30:48 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:30:52 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:30:52 [WARNING] ⚠️  [Retry] Transient error (attempt 2/6), sleeping 4.9s: 504 Deadline expired before operation could complete.
+2025-12-24 14:30:57 [INFO] API call attempt 3/6 for batch ['5,257', '5,258', '5,259']...
+2025-12-24 14:30:57 [INFO] Calling Gemini API with timeout=60s...
+2025-12-24 14:31:35 [CRITICAL] 🚨 RATE WATCHDOG TRIGGERED: Processing completely stalled: 0 items processed in last 186 seconds (180s timeout). Last processed count: 0
+2025-12-24 14:31:38 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:31:39 [WARNING] ⚠️  [Retry] Transient error (attempt 3/6), sleeping 8.7s: 504 Deadline expired before operation could complete.
+2025-12-24 14:31:47 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:31:47 [WARNING] ⚠️  [Retry] Transient error (attempt 3/6), sleeping 8.3s: 504 Deadline expired before operation could complete.
+2025-12-24 14:31:47 [INFO] 📊 Progress: 1/14946 batches (0.0%)
+2025-12-24 14:31:56 [ERROR] ❌ API call failed: 504 Deadline expired before operation could complete.
+2025-12-24 14:31:56 [WARNING] ⚠️  [Retry] Transient error (attempt 3/6), sleeping 8.1s: 504 Deadline expired before operation could complete.
+2025-12-24 14:32:04 [INFO] 
+============================================================
+2025-12-24 14:32:04 [INFO] Processing loop ended. Batches completed: 1/14946
+2025-12-24 14:32:04 [INFO] ============================================================
+
+=== AI PRODUCT CLASSIFIER (gemini-3-flash-preview) ===
+Input file:  tf_menu.csv
+Output file: tf_menu_labeled_v8.csv
+Taxonomy:    category_definitions3.json
+Workers:     3 | Batch size: 25 | RPS: 0.12
+Retries:     6 | Backoff base: 2.0s | Timeout: 60s
+
+Loading tf_menu.csv...
+Total Products: 374,857
+Already Processed: 1,575 products
+Remaining to Process: 373,629
+
+🚨 SHUTDOWN TRIGGERED. Cancelling remaining in-flight requests...
+
+═══════════════════════════════════════════════════════════
+🚨 APPLICATION STOPPED DUE TO CRITICAL GEMINI ERROR
+Reason: Processing completely stalled: 0 items processed in last 186 seconds (180s timeout). Last processed count: 0
+Progress: {'processed': 0, 'success': 0, 'unknown': 0, 'error': 0, 'level1_counts': Counter(), 'level12_counts': Counter()}
+Cost: Calls: 0 | Tokens: 0 in / 0 out | Cost: $0.0000 (in $0.0000 + out $0.0000)
+═══════════════════════════════════════════════════════════
