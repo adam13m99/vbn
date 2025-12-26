@@ -63,9 +63,9 @@ TAXONOMY_FILE = "category_definitions.json"
 
 CONFIG: Dict[str, Any] = {
     # --- Gemini (match validator config) ---
-    "GEMINI_API_KEY": os.getenv("GENAI_API_KEY", "AIzaSyDo6khqPW8yqKdnhLveVJIeeW73W3e4ME0"),  # REQUIRED
+    "GEMINI_API_KEY": os.getenv("GENAI_API_KEY", "AIzaSyAs3AW3chLG2OACK3f_2RlRD9YOn0AjWWA"),  # REQUIRED
     "MODEL_NAME": "gemini-3-flash-preview",
-    "TEMPERATURE": 0.3,  # match validator
+    "TEMPERATURE": 0.0,  # match validator
 
     # --- Processing (match validator config) ---
     "MAX_WORKERS": 5,
@@ -195,9 +195,12 @@ class TelegramReporter:
                 try:
                     r = requests.post(url, json=payload, timeout=self.timeout_sec)
                     if r.status_code == 200:
+                        logging.info(f"✅ Telegram message sent successfully")
                         break
+                    logging.warning(f"⚠️ Telegram send failed (attempt {attempt+1}/3): HTTP {r.status_code}")
                     time.sleep(1.5 * (attempt + 1))
-                except Exception:
+                except Exception as e:
+                    logging.warning(f"⚠️ Telegram send error (attempt {attempt+1}/3): {e}")
                     time.sleep(1.5 * (attempt + 1))
 
 
